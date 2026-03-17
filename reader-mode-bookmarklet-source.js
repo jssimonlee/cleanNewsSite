@@ -13,6 +13,7 @@
     ".story-body",
     ".post-content",
     ".entry-content",
+    ".news_article",
     ".news-article",
     ".article"
   ];
@@ -64,6 +65,14 @@
     ".headline",
     ".title_area",
     ".media_end_head",
+    "#news_relGisa",
+    "#news_relGisa2",
+    "#news_photoArea",
+    "#photo_slide",
+    "[id*='relGisa']",
+    "[class*='relGisa']",
+    "[class*='photonews']",
+    "[class*='photo_news']",
     "[class*='footer']",
     "[id*='footer']",
     "[data-testid='comments']"
@@ -89,6 +98,17 @@
     "[class*='link_news']",
     "[class*='promotion']",
     "[class*='ranking']"
+  ].join(",");
+  const CAPTION_SELECTOR = [
+    "figcaption",
+    ".img_desc",
+    ".imgcaption",
+    "td[class*='caption']",
+    "div[class*='caption']",
+    "p[class*='caption']",
+    "span[class*='desc']",
+    "span[class*='caption']",
+    "em"
   ].join(",");
   const normalizeText = (value) => String(value || "").replace(/\s+/g, " ").trim();
   const absoluteUrl = (value) => {
@@ -163,8 +183,8 @@
       return "";
     }
     const caption = normalizeText(
-      element.querySelector?.("figcaption,.img_desc,em,span[class*='desc']")?.innerText ||
-      image.closest?.("figure")?.querySelector?.("figcaption,.img_desc,em,span[class*='desc']")?.innerText ||
+      element.querySelector?.(CAPTION_SELECTOR)?.innerText ||
+      image.closest?.("figure,table,div,section,p,li,blockquote")?.querySelector?.(CAPTION_SELECTOR)?.innerText ||
       ""
     );
     const alt = normalizeText(image.getAttribute("alt") || caption);
@@ -613,6 +633,59 @@
     const paragraphCount = items.filter((item) => item.type === "paragraph").length;
     return items.filter((item) => item.type === "figure" || item.text.length >= 16 || (paragraphCount <= 3 && item.text.length >= 8));
   };
+  const buildDetachedResult = (root, extraStripSelectors = "") => {
+    if (!root) {
+      return null;
+    }
+    const clone = root.cloneNode(true);
+    const stripSelectors = [STRIP_SELECTOR, extraStripSelectors].filter(Boolean).join(",");
+    if (stripSelectors) {
+      clone.querySelectorAll(stripSelectors).forEach((node) => {
+        node.remove();
+      });
+    }
+    const items = extractDetachedContent(clone);
+    const paragraphs = items.filter((item) => item.type === "paragraph").map((item) => item.text);
+    const longParagraphCount = paragraphs.filter((text) => text.length >= 70).length;
+    const paragraphTextLength = paragraphs.reduce((total, text) => total + text.length, 0);
+    if (!items.length || !paragraphs.length) {
+      return null;
+    }
+    return {
+      root,
+      items,
+      paragraphs,
+      paragraphCount: paragraphs.length,
+      longParagraphCount,
+      paragraphTextLength
+    };
+  };
+  const scoreDetachedResult = (result) => {
+    if (!result) {
+      return -Infinity;
+    }
+    const { root, paragraphCount, longParagraphCount, paragraphTextLength } = result;
+    if (paragraphTextLength < 320 || longParagraphCount < 2) {
+      return -Infinity;
+    }
+    let score = (seedScores.get(root) || 0) + paragraphTextLength * 0.55 + paragraphCount * 220 - linkDensity(root) * 1200;
+    if (root.tagName === "ARTICLE") {
+      score += 320;
+    }
+    if (root.matches && root.matches("[itemprop='articleBody']")) {
+      score += 520;
+    }
+    if (root.matches && root.matches(".article-body,.article-content,.post-content,.entry-content,.story-body,.article_txt,.article-view-content-div,.news_end,.news_article")) {
+      score += 300;
+    }
+    if (root.matches && root.matches("main")) {
+      score += 80;
+    }
+    if (root === document.body) {
+      score -= 1800;
+    }
+    return score;
+  };
   const extractNaverNewsArticle = () => {
     if (!isNaverNews) {
       return null;
@@ -682,12 +755,41 @@
       }
     });
 
+    let bestDetachedResult = null;
+    let bestDetachedScore = -Infinity;
+    [...new Set([
+      bestRoot,
+      ...ROOT_SELECTORS.flatMap((selector) => [...document.querySelectorAll(selector)]),
+      document.querySelector("[itemprop='articleBody']"),
+      document.querySelector("article"),
+      document.querySelector("main"),
+      document.body
+    ].filter(Boolean))].forEach((root) => {
+      const detachedResult = buildDetachedResult(root);
+      const detachedScore = scoreDetachedResult(detachedResult);
+      if (detachedScore > bestDetachedScore) {
+        bestDetachedScore = detachedScore;
+        bestDetachedResult = detachedResult;
+      }
+    });
+
     title = getTitle();
-    articleHtml = blocks.length ? blocks.map((block) => block.outerHTML).join("") : buildFallbackHtml(bestRoot);
-    speechText = [
-      title,
-      ...(blocks.length ? blocks.map((block) => normalizeText(block.innerText)).filter(Boolean) : [normalizeText(bestRoot.innerText)])
-    ].filter(Boolean).join(". ");
+    const shouldUseDetachedResult = !!bestDetachedResult && (
+      !blocks.length ||
+      bestBlocksText < 320 ||
+      bestDetachedResult.paragraphTextLength > bestBlocksText + 120
+    );
+    if (shouldUseDetachedResult) {
+      bestRoot = bestDetachedResult.root;
+      articleHtml = bestDetachedResult.items.map((item) => item.type === "figure" ? item.html : `<p>${escapeHtml(item.text)}</p>`).join("");
+      speechText = [title, ...bestDetachedResult.paragraphs].join(". ");
+    } else {
+      articleHtml = blocks.length ? blocks.map((block) => block.outerHTML).join("") : buildFallbackHtml(bestRoot);
+      speechText = [
+        title,
+        ...(blocks.length ? blocks.map((block) => normalizeText(block.innerText)).filter(Boolean) : [normalizeText(bestRoot.innerText)])
+      ].filter(Boolean).join(". ");
+    }
   }
 
   const detectedSpeechLang = inferSpeechLang(speechText);
@@ -746,7 +848,7 @@
     const mediaAnchors = anchors.filter((anchor) => isMediaLink(anchor));
     const textLength = normalizeText(element.textContent).length;
     const imageCount = element.querySelectorAll("img,picture").length;
-    const caption = normalizeText(element.querySelector("figcaption,.img_desc,em,span[class*='desc']")?.textContent || "");
+    const caption = normalizeText(element.querySelector(CAPTION_SELECTOR)?.textContent || "");
     if (!mediaAnchors.length || mediaAnchors.length !== anchors.length) {
       return false;
     }
