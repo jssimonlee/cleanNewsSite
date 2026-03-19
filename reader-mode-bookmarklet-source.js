@@ -167,8 +167,11 @@
     const linkedText = [...element.querySelectorAll("a")].reduce((total, anchor) => total + normalizeText(anchor.innerText).length, 0);
     return linkedText / text.length;
   };
-  const hasMedia = (element) => !!element.querySelector("img,picture,figure,table,pre,blockquote,ul,ol");
-  const buildFigureHtml = (element) => {
+  const hasMedia = (element) => !!element && (
+    (element.matches && element.matches("img,picture,figure,table,pre,blockquote,ul,ol")) ||
+    !!element.querySelector?.("img,picture,figure,table,pre,blockquote,ul,ol")
+  );
+  const buildFigureHtml = (element, options = {}) => {
     const image = element?.tagName === "IMG" ? element : element?.querySelector?.("img");
     const source = getImageSource(image);
     if (!image || !source) {
@@ -183,11 +186,17 @@
       return "";
     }
     const caption = normalizeText(
-      element.querySelector?.(CAPTION_SELECTOR)?.innerText ||
-      image.closest?.("figure,table,div,section,p,li,blockquote")?.querySelector?.(CAPTION_SELECTOR)?.innerText ||
-      ""
+      typeof options.captionText === "string"
+        ? options.captionText
+        : options.includeCaption === false
+          ? ""
+          : (
+            element.querySelector?.(CAPTION_SELECTOR)?.innerText ||
+            image.closest?.("figure,table,div,section,p,li,blockquote")?.querySelector?.(CAPTION_SELECTOR)?.innerText ||
+            ""
+          )
     );
-    const alt = normalizeText(image.getAttribute("alt") || caption);
+    const alt = normalizeText(image.getAttribute("alt") || caption || options.fallbackAlt || "");
     return `<figure><img src="${escapeHtml(source)}" alt="${escapeHtml(alt)}">${caption ? `<figcaption>${escapeHtml(caption)}</figcaption>` : ""}</figure>`;
   };
   const isMetaText = (text) => text.length < 90 && (
@@ -201,6 +210,7 @@
   );
   const cleanTitle = (value) => normalizeText(value).replace(/\s+[|·•-]\s+[^|·•-]+$/, "");
   const isNaverNews = /(^|\.)n\.news\.naver\.com$/i.test(location.hostname) || /(^|\.)news\.naver\.com$/i.test(location.hostname);
+  const is4TravelTravelogue = /(^|\.)4travel\.jp$/i.test(location.hostname) && /^\/travelogue\/\d+/.test(location.pathname);
   const normalizeSpeechLang = (value) => normalizeText(value).replace(/_/g, "-");
   const primaryLang = (value) => normalizeSpeechLang(value).toLowerCase().split("-")[0];
   const canonicalSpeechLang = (value) => {
@@ -718,15 +728,72 @@
       speechText: [getTitle(), ...paragraphs].join(". ")
     };
   };
+  const extract4TravelTravelogue = () => {
+    if (!is4TravelTravelogue) {
+      return null;
+    }
+    const bodyRoot = document.querySelector(".travelogue_blogBody");
+    const photoBoxes = [...document.querySelectorAll("#photo_list > li.photoBox")];
+    if (!bodyRoot || !photoBoxes.length) {
+      return null;
+    }
+    const items = [];
+    const paragraphs = [];
+    const seenImageSources = new Set();
+    const pushParagraph = (value) => {
+      const text = normalizeText(value);
+      if (!text || isMetaText(text) || isBoilerplateText(text)) {
+        return;
+      }
+      paragraphs.push(text);
+      items.push({ type: "paragraph", text });
+    };
+    const pushFigure = (element) => {
+      const image = element?.tagName === "IMG" ? element : element?.querySelector?.("img");
+      const source = getImageSource(image);
+      if (!source || seenImageSources.has(source)) {
+        return;
+      }
+      const figureHtml = buildFigureHtml(image || element, {
+        includeCaption: false,
+        fallbackAlt: normalizeText(image?.getAttribute("alt") || "")
+      });
+      if (!figureHtml) {
+        return;
+      }
+      seenImageSources.add(source);
+      items.push({ type: "figure", html: figureHtml });
+    };
 
-  const naverResult = extractNaverNewsArticle();
-  let bestRoot = naverResult?.root || null;
+    pushFigure(bodyRoot.querySelector("#photo_cover_link,.travelogue_coverPhoto,.travelogue_coverPhoto_image"));
+    pushParagraph(bodyRoot.querySelector(".outlineTextBlock")?.innerText || "");
+
+    photoBoxes.forEach((photoBox) => {
+      pushFigure(photoBox.querySelector(".photoInner,img"));
+      pushParagraph(photoBox.querySelector(".contentsDescription")?.innerText || "");
+    });
+
+    if (!items.length || !paragraphs.length) {
+      return null;
+    }
+
+    return {
+      root: bodyRoot,
+      title: getTitle(),
+      articleHtml: items.map((item) => item.type === "figure" ? item.html : `<p>${escapeHtml(item.text)}</p>`).join(""),
+      speechText: [getTitle(), ...paragraphs].join(". ")
+    };
+  };
+
+  const fourTravelResult = extract4TravelTravelogue();
+  const naverResult = fourTravelResult ? null : extractNaverNewsArticle();
+  let bestRoot = fourTravelResult?.root || naverResult?.root || null;
   let blocks = [];
-  let title = naverResult?.title || "";
-  let articleHtml = naverResult?.articleHtml || "";
-  let speechText = naverResult?.speechText || "";
+  let title = fourTravelResult?.title || naverResult?.title || "";
+  let articleHtml = fourTravelResult?.articleHtml || naverResult?.articleHtml || "";
+  let speechText = fourTravelResult?.speechText || naverResult?.speechText || "";
 
-  if (!naverResult) {
+  if (!fourTravelResult && !naverResult) {
     let bestScore = -Infinity;
     candidates.forEach((candidate) => {
       const currentScore = scoreRoot(candidate);
